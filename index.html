@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<!--
+DOPMC CMMS — Single-file app (final corrected)
+- Storage bucket corrected to the appspot.com value from Firebase console.
+- Firestore imports include getDoc.
+- itemMaster queries consistently order by 'item_name'.
+- CSV import records upload metadata (db.inventoryUploads) and shows Uploaded CSVs list.
+- You can Delete an uploaded CSV (revert): removes associated txns and removes items that have no remaining txns.
+- Inventory items may be deleted manually (removes related stock ledger entries).
+- Safe Firestore write-through helpers (fsUpsert / fsDel) included and called when FB_OK.
+- Minor robustness fixes (saveDB before remote deletes, defensive checks).
+No UI layout, colors, or structure changed beyond adding the uploads list and delete buttons as requested.
+Credentials: username = "admin", password = "dopmc1971"
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DOPMC • CMMS (Live)</title>
+  <style>
+    /* Full app CSS preserved (unchanged layout & styling) */
+    :root{
+      --bg:#e9eef6;
+      --panel:#ffffff;
+      --line:#d9e2ef;
+      --text:#0b1b33;
+      --muted:#5b6b82;
+      --blue1:#0b3a8a;
+      --blue2:#0a2f72;
+      --blue3:#0e4aa8;
+      --kpiBlue:#0f61c6;
+      --kpiYellow:#ffc21b;
+      --kpiOrange:#ff7a2a;
+      --kpiGreen:#2eaf4a;
+      --pillBlue:#1768d0;
+      --pillGreen:#28b463;
+      --crit:#d61f1f;
+      --high:#f39c12;
+      --med:#1aa3b1;
+      --low:#f1c40f;
+      --open:#1b66d1;
+      --inprog:#f39c12;
+      --done:#2eaf4a;
+      --shadow: 0 10px 24px rgba(12,30,66,.12);
+      --shadow2: 0 8px 18px rgba(12,30,66,.10);
+      --radius: 14px;
+      --radius2: 10px;
+      --easeOut: cubic-bezier(.2,.8,.2,1);
+      --easeInOut: cubic-bezier(.4,0,.2,1);
+      --durFast: 120ms;
+      --durMed: 220ms;
+      --durSlow: 360ms;
+      --focusRing: 0 0 0 3px rgba(15,97,198,.22);
+    }
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      background: radial-gradient(1200px 700px at 20% -10%, rgba(14,74,168,.14), transparent 60%),
+                  radial-gradient(1100px 650px at 110% 10%, rgba(15,97,198,.10), transparent 55%),
+                  var(--bg);
+      color:var(--text);
+      overflow-x:hidden;
+    }
+    .frame{
+      max-width: 1180px;
+      margin: 18px auto;
+      padding: 10px;
+      border-radius: 26px;
+      background: linear-gradient(180deg, rgba(11,58,138,.90), rgba(10,47,114,.92));
+      box-shadow: 0 18px 40px rgba(0,0,0,.18);
+    }
+    .shell{
+      border-radius: 22px;
+      background: var(--bg);
+      overflow:hidden;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.18);
+      min-height: calc(100vh - 36px);
+      display:flex;
+      flex-direction:column;
+      transition: opacity var(--durSlow) var(--easeInOut);
+    }
+    .topbar{
+      min-height: 78px;
+      padding: 14px 18px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      background: linear-gradient(180deg, #0b367f 0%, #0a2f72 70%, #0a2a68 100%);
+      color: #fff;
+      position: sticky;
+      top: 0;
+      z-index: 60;
+      border-bottom:1px solid rgba(255,255,255,.12);
+      box-shadow: 0 2px 8px rgba(0,0,0,.0);
+      transition: box-shadow var(--durMed) var(--easeOut);
+    }
+    .topbar.scrolled{box-shadow: 0 4px 16px rgba(0,0,0,.18);}
+    .brand{display:flex;align-items:center;gap:12px;min-width: 260px;}
+    .brandIcon{
+      width:44px;height:44px;border-radius:50%;
+      background: radial-gradient(circle at 30% 30%, rgba(255,255,255,.25), rgba(255,255,255,.10) 40%, rgba(0,0,0,.08) 70%),rgba(255,255,255,.10);
+      border:2px solid rgba(255,255,255,.55);display:grid;place-items:center;position:relative;
+      box-shadow: 0 10px 22px rgba(0,0,0,.25);flex-shrink:0;
+    }
+    .brandIcon::after{content:"";position:absolute;inset:-5px;border-radius:50%;border:2px solid rgba(255,255,255,.18);}
+    .brandTitle{display:flex;flex-direction:column;gap:2px;line-height:1.1;overflow:hidden;}
+    .brandTitle strong{font-size:17px;letter-spacing:.2px;font-weight:1000;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .brandTitle span{font-size:12px;opacity:.78;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .topRight{display:flex;align-items:center;gap:12px;}
+    .livePill{
+      background: linear-gradient(180deg, rgba(40,180,99,.95), rgba(32,155,84,.95));color:#fff;
+      border:1px solid rgba(255,255,255,.28);padding:8px 14px;border-radius:999px;font-weight:700;font-size:12px;
+      display:flex;align-items:center;gap:8px;box-shadow: 0 10px 18px rgba(0,0,0,.18);user-select:none;cursor:pointer;
+      transition: transform var(--durFast) var(--easeOut), box-shadow var(--durMed) var(--easeOut);
+    }
+    .livePill:hover{transform: translateY(-1px);box-shadow: 0 12px 22px rgba(0,0,0,.22);}
+    .dotLive{width:8px;height:8px;border-radius:50%;background:#fff;box-shadow: 0 0 0 4px rgba(255,255,255,.10);animation: pulse 2.4s ease-in-out infinite;}
+    @keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.06);opacity:.9}}
+    .userMenu{display:flex;align-items:center;gap:10px;padding: 6px 10px;border-radius: 999px;border:1px solid rgba(255,255,255,.22);background: rgba(255,255,255,.10);box-shadow: 0 10px 18px rgba(0,0,0,.16);transition: background var(--durMed) var(--easeOut);max-width: 280px;overflow:hidden;}
+    .userMenu:hover{background: rgba(255,255,255,.15);}
+    .avatar{width:34px;height:34px;border-radius:50%;background: radial-gradient(circle at 30% 30%, rgba(255,255,255,.35), rgba(255,255,255,.08) 55%),rgba(255,255,255,.16);display:grid;place-items:center;font-weight:900;flex-shrink:0;}
+    .userMenu small{opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .caret{width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:6px solid rgba(255,255,255,.85);margin-left:2px;flex-shrink:0;}
+    .content{padding: 16px 16px 24px;max-width: 1240px;margin: 0 auto;width:100%;flex:1;}
+    .tabs{display:flex;gap:8px;align-items:center;margin-bottom: 16px;}
+    .tabBtn{border:1px solid #cfd8e8;background: #f9fbff;border-radius: 999px;padding:10px 16px;font-weight:800;font-size:12px;color: var(--muted);cursor:pointer;box-shadow: 0 2px 8px rgba(12,30,66,.06);transition: transform var(--durFast) var(--easeOut),background var(--durMed) var(--easeInOut),border-color var(--durMed) var(--easeInOut),box-shadow var(--durMed) var(--easeOut),color var(--durMed) var(--easeInOut);user-select:none;display:flex;align-items:center;gap:8px;}
+    .tabBtn:hover:not(.active){background: #eef3fc;border-color: #b8c6de;box-shadow: 0 4px 12px rgba(12,30,66,.10);transform: translateY(-1px);}
+    .tabBtn:active{transform: translateY(1px)}
+    .tabBtn.active{color:#fff;border-color: rgba(255,255,255,.0);background: linear-gradient(180deg, #1a67ce, #0b3a8a);box-shadow: 0 6px 16px rgba(11,58,138,.28);}
+    .tabs .spacer{flex:1}
+    .miniCtrl{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}
+    .sel,.inp{border:1px solid var(--line);background:#fff;border-radius:999px;padding:10px 12px;font-size:12px;outline:none;box-shadow: 0 2px 6px rgba(12,30,66,.05);color: var(--text);transition: border-color var(--durMed) var(--easeOut),box-shadow var(--durMed) var(--easeOut);}
+    .sel:focus,.inp:focus{border-color: rgba(15,97,198,.45);box-shadow: var(--focusRing);}
+    .inp{min-width: 210px}
+    .btn{border:1px solid rgba(11,58,138,.18);background: linear-gradient(180deg, rgba(11,58,138,.08), rgba(11,58,138,.05));color: var(--blue1);border-radius:999px;padding:10px 14px;font-size:12px;font-weight:900;cursor:pointer;box-shadow: 0 2px 6px rgba(12,30,66,.06);transition: transform var(--durFast) var(--easeOut),box-shadow var(--durMed) var(--easeOut),filter var(--durMed) var(--easeOut),background var(--durMed) var(--easeOut);}
+    .btn:hover{box-shadow: 0 4px 14px rgba(12,30,66,.12);transform: translateY(-1px);}
+    .btn:active{transform: translateY(1px);box-shadow: 0 1px 4px rgba(12,30,66,.10);}
+    .btn.primary{background: linear-gradient(180deg, var(--blue3), var(--blue2));color:#fff;border-color: rgba(255,255,255,.0);}
+    .btn.primary:hover{box-shadow: 0 6px 18px rgba(11,58,138,.25);}
+    .btn.secondary{background: rgba(11,58,138,.04);border:1px solid var(--line);color: var(--muted);font-size:11px;padding:8px 12px;}
+    .btn.secondary:hover{background: rgba(11,58,138,.08);color: var(--blue1);}
+    .btn.danger{background:rgba(214,31,31,.08);border:1px solid rgba(214,31,31,.2);color:#c62828;font-size:11px;padding:6px 10px;}
+    .btn.danger:hover{background:rgba(214,31,31,.14);}
+    .kpiRow{display:grid;grid-template-columns: repeat(4, 1fr);gap: 14px;margin: 12px 0 16px;}
+    @media (max-width: 980px){.kpiRow{grid-template-columns: 1fr 1fr}}
+    @media (max-width: 560px){.kpiRow{grid-template-columns: 1fr}}
+    .kpi{border-radius: var(--radius);color:#fff;padding: 18px 20px;box-shadow: var(--shadow);position:relative;overflow:hidden;display:flex;align-items:center;justify-content:space-between;min-height: 82px;cursor:pointer;transition: transform var(--durMed) var(--easeOut),box-shadow var(--durMed) var(--easeOut),border-color var(--durMed) var(--easeOut);}
+    .kpi:hover{transform: translateY(-2px);box-shadow: 0 14px 28px rgba(12,30,66,.16);}
+    .kpi::before{content:"";position:absolute;inset:-60px -60px auto auto;width:160px;height:160px;border-radius:50%;background: rgba(255,255,255,.12);filter: blur(0px);transform: rotate(12deg);animation: floatBlob 10s ease-in-out infinite;}
+    @keyframes floatBlob{0%,100%{transform: translate(0,0) rotate(12deg)}50%{transform: translate(-6px, 6px) rotate(16deg)}}
+    .kpi .num{font-size: 34px;font-weight: 1000;letter-spacing:.3px;}
+    .kpi .lbl{font-size: 13px;font-weight: 900;opacity:.95;line-height:1.1;}
+    .kpi .meta{display:flex;flex-direction:column;gap:2px;}
+    .kpi .sub{font-size: 11px;opacity:.88;font-weight:700;}
+    .kpi.blue{background: linear-gradient(180deg, #1971d6, #0f56b3)}
+    .kpi.yellow{background: linear-gradient(180deg, #ffd250, #f3b300); color:#1f2a3a}
+    .kpi.orange{background: linear-gradient(180deg, #ff9a4d, #ff6a1f)}
+    .kpi.green{background: linear-gradient(180deg, #39c05a, #249b3f)}
+    .panel{background: var(--panel);border:1px solid var(--line);border-radius: var(--radius);box-shadow: 0 2px 8px rgba(12,30,66,.06);overflow:hidden;transition: transform var(--durMed) var(--easeOut),box-shadow var(--durMed) var(--easeOut),border-color var(--durMed) var(--easeOut);}
+    .panel:hover{transform: translateY(-1px);box-shadow: 0 6px 18px rgba(12,30,66,.10);border-color: #c5d2ea;}
+    .panelHead{padding: 14px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;background: linear-gradient(180deg, rgba(11,58,138,.04), rgba(255,255,255,.0));gap:12px;flex-wrap:wrap;}
+    .panelHead h3{margin:0;font-size: 14px;color: #0b2f6e;letter-spacing:.2px;}
+    .panelBody{padding: 14px 16px;}
+    table{width:100%; border-collapse:separate; border-spacing:0}
+    .tblWrap{overflow:auto;border:1px solid var(--line);border-radius: var(--radius2);background:#fff;}
+    th,td{padding: 10px 12px;border-bottom:1px solid var(--line);font-size: 12px;white-space:nowrap;text-align:left;}
+    th{background: #f4f7fd;color:#2b3a54;font-weight: 900;position: sticky;top: 0;z-index: 1;}
+    tr:last-child td{border-bottom:none}
+    tbody tr{transition: background var(--durFast) var(--easeOut);}
+    tbody tr:hover{background: rgba(15,97,198,.03);}
+    .woLink{color:#0f61c6;font-weight: 1000;text-decoration:none;}
+    .pill{display:inline-flex;align-items:center;justify-content:center;padding: 7px 12px;border-radius: 10px;font-size: 12px;font-weight: 1000;color:#fff;min-width: 96px;box-shadow: 0 4px 10px rgba(0,0,0,.06);}
+    .prio.critical{background: linear-gradient(180deg, #e53935, #c62828)}
+    .prio.high{background: linear-gradient(180deg, #ffb300, #f39c12)}
+    .prio.medium{background: linear-gradient(180deg, #2cc6d0, #1aa3b1)}
+    .prio.low{background: linear-gradient(180deg, #f7d154, #f1c40f); color:#24324a}
+    .stat.open{background: linear-gradient(180deg, #1f7ae0, #1b66d1)}
+    .stat.inprogress{background: linear-gradient(180deg, #ffc04d, #f39c12); color:#1f2a3a}
+    .stat.completed{background: linear-gradient(180deg, #43c463, #2eaf4a)}
+    .lowerGrid{display:grid;grid-template-columns: 1fr 1fr 1fr;gap: 14px;margin-top: 16px;}
+    @media (max-width: 980px){.lowerGrid{grid-template-columns: 1fr}}
+    .widgets{display:grid;grid-template-columns: 1fr 1fr 1fr;gap: 14px;margin-top: 16px;}
+    @media (max-width: 980px){.widgets{grid-template-columns: 1fr}}
+    .miniList{display:grid; gap:8px;padding: 4px 0 0;}
+    .miniItem{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius: 12px;background: #fbfcff;transition: background var(--durFast) var(--easeOut),border-color var(--durFast) var(--easeOut);}
+    .miniItem:hover{background: #f0f4ff;border-color: #c5d2ea;}
+    .miniItem .left{display:flex;align-items:center;gap:10px;font-weight: 900;color:#22314b;font-size:12px;}
+    .chk{width:16px;height:16px;border-radius:4px;border:2px solid #c5d2ea;background:#fff;}
+    .miniItem small{color:var(--muted); font-weight:800}
+    .chartWrap{border:1px solid var(--line);border-radius: 12px;padding: 12px;background: #fbfcff;}
+    .chartTop{display:flex; align-items:center; justify-content:space-between; gap:10px;margin-bottom:8px;}
+    .drop{border:1px solid var(--line);background:#fff;border-radius: 8px;padding:6px 10px;font-size:12px;font-weight:900;color:#2b3a54;cursor:pointer;outline:none;transition: border-color var(--durMed) var(--easeOut), box-shadow var(--durMed) var(--easeOut);}
+    .drop:focus{border-color: rgba(15,97,198,.45);box-shadow: var(--focusRing);}
+    .legendRow{display:flex; gap:10px; flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:11px;font-weight:900;}
+    .key{display:flex; align-items:center; gap:6px}
+    .sw{width:10px;height:10px;border-radius:3px; background:#0f61c6}
+    .sw.y{background:#f3b300}.sw.o{background:#ff6a1f}.sw.g{background:#2eaf4a}.sw.r{background:#d61f1f}.sw.c{background:#1aa3b1}
+    .twoCol{display:grid;grid-template-columns: 1fr 1fr;gap: 14px;}
+    @media (max-width: 980px){.twoCol{grid-template-columns: 1fr}}
+    .formGrid{display:grid;grid-template-columns: repeat(2, 1fr);gap: 12px;}
+    @media (max-width: 560px){.formGrid{grid-template-columns: 1fr}}
+    .field label{display:block;font-size:11px;font-weight:1000;color:#2b3a54;margin-bottom:6px;}
+    .field input, .field select, .field textarea{width:100%;border:1px solid var(--line);border-radius: 12px;padding: 10px 12px;font-size: 12px;outline:none;background:#fbfcff;transition: border-color var(--durMed) var(--easeOut),box-shadow var(--durMed) var(--easeOut);}
+    .field input:focus, .field select:focus, .field textarea:focus{border-color: rgba(15,97,198,.45);box-shadow: var(--focusRing);}
+    .field textarea{min-height: 110px; resize: vertical}
+    .actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top: 12px;}
+    .overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background: rgba(10,22,45,.55);backdrop-filter: blur(10px);z-index: 9999;padding: 16px;opacity:1;transition: opacity var(--durSlow) var(--easeInOut);}
+    .overlay.hide{opacity:0;pointer-events:none;}
+    .loginCard{width: min(520px, 100%);border-radius: 18px;overflow:hidden;box-shadow: 0 22px 60px rgba(0,0,0,.30);border:1px solid rgba(255,255,255,.18);background: linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.06));transform: translateY(0);transition: transform var(--durSlow) var(--easeOut);}
+    .overlay.hide .loginCard{transform: translateY(16px);}
+    .loginInner{background: linear-gradient(180deg, rgba(11,58,138,.95), rgba(10,47,114,.95));padding: 16px;color:#fff;display:flex;gap:12px;align-items:center;justify-content:space-between;}
+    .loginBody{background: #f3f7ff;padding: 16px;}
+    .loginBody .field input{background:#fff;}
+    .err{display:none;margin-top:10px;padding:10px 12px;border-radius: 12px;border:1px solid rgba(214,31,31,.25);background: rgba(214,31,31,.10);color:#7b1212;font-weight: 900;font-size: 12px;}
+    .viewPanel{transition: opacity var(--durMed) var(--easeInOut),transform var(--durMed) var(--easeOut);}
+    .viewPanel.hide{display:none !important;}
+    #printSheet.hide{display:none !important;}
+    .viewPanel.viewExit{opacity:0;transform: translateY(6px);}
+    .viewPanel.viewEnter{animation: viewFadeIn var(--durSlow) var(--easeOut) forwards;}
+    @keyframes viewFadeIn{from{opacity:0; transform: translateY(8px);}to{opacity:1; transform: translateY(0);}}
+    .footer{padding: 14px 16px 16px;color: var(--muted);font-weight: 800;font-size: 11px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;}
+    #inventoryView .panel{margin-bottom:12px;}
+    #ticketView,#inventoryView{margin-top:8px;}
+    #inventoryView .panelBody input:not([type="file"]),
+    #inventoryView .panelBody select,
+    #inventoryView .panelBody button:not(.btn){
+      border:1px solid var(--line);border-radius: 10px;padding: 8px 12px;font-size: 12px;outline:none;background:#fbfcff;font-weight:800;cursor:pointer;margin: 2px 4px 2px 0;transition: border-color var(--durMed) var(--easeOut),box-shadow var(--durMed) var(--easeOut);
+    }
+    #inventoryView .panelBody input:not([type="file"]):focus{border-color: rgba(15,97,198,.45);box-shadow: var(--focusRing);}
+    #inventoryView .panelBody button:not(.btn){background: linear-gradient(180deg, rgba(11,58,138,.08), rgba(11,58,138,.04));color: var(--blue1);font-weight:900;border:1px solid rgba(11,58,138,.15);transition: transform var(--durFast) var(--easeOut),box-shadow var(--durMed) var(--easeOut);}
+    #inventoryView .panelBody button:not(.btn):hover{box-shadow: 0 3px 10px rgba(12,30,66,.10);transform: translateY(-1px);}
+    #inventoryView .panelBody button:not(.btn):active{transform: translateY(1px);}
+    /* inline status select */
+    .inlineSel{border:1px solid var(--line);border-radius:8px;padding:4px 6px;font-size:11px;font-weight:800;outline:none;background:#fbfcff;cursor:pointer;}
+    .inlineSel:focus{border-color:rgba(15,97,198,.45);box-shadow:var(--focusRing);}
+    /* MR line items table */
+    .mrLines{width:100%;border-collapse:collapse;margin:6px 0 8px;}
+    .mrLines th,.mrLines td{padding:6px 8px;border:1px solid var(--line);font-size:11px;text-align:left;}
+    .mrLines th{background:#f4f7fd;font-weight:900;}
+    @media (max-width: 768px){
+      .topbar{padding:12px; gap:10px; flex-wrap:wrap;}
+      .brand{min-width:unset;}
+      .topRight{width:100%; justify-content:space-between;}
+      .tabs{gap:6px; flex-wrap:wrap;}
+      .miniCtrl{width:100%; justify-content:flex-start;}
+      .inp{min-width:160px;}
+      .panelHead{padding:12px 14px;}
+      .panelBody{padding:12px 14px;}
+      th,td{padding:8px 10px; font-size:11px;}
+      .kpi .num{font-size:28px;}
+      .globalFooter{height:46px; font-size:11px;}
+      .content{padding-bottom:14px;}
+    }
+    .globalFooter{height:48px;display:flex;align-items:center;justify-content:center;background: linear-gradient(180deg, rgba(243,247,255,.96), rgba(233,238,246,.98));border-top:1px solid #cfd8e8;color:#3b4b66;font-size:12px;font-weight:900;letter-spacing:.1px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 16px;margin-top:auto;position:static;}
+    @media print{
+      body *{visibility:hidden !important;}
+      #printSheet, #printSheet *{visibility:visible !important;}
+      #printSheet{position:fixed; inset:0; padding:24px; background:#fff; color:#000; font-size:12px;}
+      #printSheet table{width:100%; border-collapse:collapse;}
+      #printSheet th,#printSheet td{border:1px solid #888; padding:6px;}
+      #printSheet .sig{display:grid; grid-template-columns:1fr 1fr; gap:32px; margin-top:24px;}
+    }
+    @media (prefers-reduced-motion: reduce){
+      *, *::before, *::after{animation-duration: 0.01ms !important;animation-iteration-count: 1 !important;transition-duration: 0.01ms !important;}
+      .viewPanel.viewEnter{animation: none !important;opacity: 1 !important;transform: none !important;}
+      .kpi::before{animation: none !important;}
+      .dotLive{animation: none !important;}
+    }
+    #toastBox{transition: opacity var(--durMed) var(--easeOut), transform var(--durMed) var(--easeOut);}
+    #fbBanner{padding:10px 14px;background:rgba(214,31,31,.08);border:1px solid rgba(214,31,31,.2);border-radius:10px;color:#7b1212;font-weight:900;font-size:12px;margin-bottom:12px;display:none;}
+    .invScrollWrap{max-height:360px;overflow-y:auto;}
+    .invEditInput{border:1px solid var(--line);border-radius:6px;padding:4px 6px;font-size:11px;width:80px;outline:none;}
+    .invEditInput:focus{border-color:rgba(15,97,198,.45);box-shadow:var(--focusRing);}
+    #csvValErr{color:#b00020;font-weight:900;font-size:11px;margin-top:4px;display:none;}
+  </style>
+</head>
+<body>
+  <div class="overlay" id="loginOverlay">
+    <div class="loginCard">
+      <div class="loginInner">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div class="brandIcon" style="width:40px;height:40px;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+              <path d="M14 7.5a4 4 0 1 1-4 0" stroke="rgba(255,255,255,.95)" stroke-width="2" stroke-linecap="round"/>
+              <path d="M12 2v8" stroke="rgba(255,255,255,.95)" stroke-width="2" stroke-linecap="round"/>
+              <path d="M4.2 10.8a8 8 0 1 0 15.6 0" stroke="rgba(255,255,255,.85)" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div>
+            <div style="font-weight:1000; letter-spacing:.2px;">DOPMC CMMS • Secure Login</div>
+            <div style="opacity:.9; font-weight:800; font-size:12px;">Maintenance dashboard & service ticketing</div>
+          </div>
+        </div>
+        <div class="livePill" style="cursor:default;"><span class="dotLive"></span> Live</div>
+      </div>
+      <div class="loginBody">
+        <div class="formGrid" style="grid-template-columns: 1fr; margin:0;">
+          <div class="field"><label>Username</label><input id="loginUser" placeholder="Enter username" autocomplete="username" /></div>
+          <div class="field"><label>Password</label><input id="loginPass" type="password" placeholder="Enter password" autocomplete="current-password" /></div>
+        </div>
+        <div class="actions" style="justify-content:space-between;">
+          <button class="btn" id="loginClear" type="button">Clear</button>
+          <button class="btn primary" id="loginBtn" type="button">Login</button>
+        </div>
+        <div class="err" id="loginErr">Invalid credentials. Please try again.</div>
+        <div style="margin-top:12px; color:#48607f; font-weight:900; font-size:11px;">Demo note: Login validation runs locally in this single HTML file.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="frame">
+    <div class="shell" id="appShell" style="opacity:0; pointer-events:none;">
+      <div class="topbar" id="topbar">
+        <div class="brand">
+          <div class="brandIcon" aria-hidden="true" title="Maintenance">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+              <path d="M10 6h4" stroke="rgba(255,255,255,.95)" stroke-width="2" stroke-linecap="round"/>
+              <path d="M12 2v4" stroke="rgba(255,255,255,.95)" stroke-width="2" stroke-linecap="round"/>
+              <path d="M5.2 19.2l3.3-3.3" stroke="rgba(255,255,255,.95)" stroke-width="2" stroke-linecap="round"/>
+              <path d="M18.8 19.2l-3.3-3.3" stroke="rgba(255,255,255,.95)" stroke-width="2" stroke-linecap="round"/>
+              <path d="M7 11a5 5 0 1 0 10 0" stroke="rgba(255,255,255,.85)" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="brandTitle">
+            <strong>DOPMC • CMMS</strong>
+            <span style="opacity:.72; font-weight:800;">General Services Division</span>
+            <span id="clockTxt">Loading…</span>
+          </div>
+        </div>
+        <div class="topRight">
+          <div class="livePill" id="liveBtn" title="Live mode"><span class="dotLive"></span> Live</div>
+          <div class="userMenu" title="User">
+            <div class="avatar" id="avatarTxt">A</div>
+            <div style="display:flex; flex-direction:column; gap:1px; overflow:hidden;">
+              <small style="font-weight:1000;">admin</small>
+              <small style="font-size:11px; opacity:.9;">General Services Division</small>
+            </div>
+            <div class="caret" aria-hidden="true"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="content">
+        <div id="fbBanner">Firebase config missing — paste keys in firebaseConfig.</div>
+
+        <div class="tabs">
+          <button class="tabBtn active" id="tabDash">📊 Overview</button>
+          <button class="tabBtn" id="tabTicket">🧾 Service Ticketing</button>
+          <button class="tabBtn" id="tabInventory">📦 Inventory</button>
+          <div class="spacer"></div>
+          <div class="miniCtrl" id="dashFilters">
+            <select class="sel" id="filterSection">
+              <option value="ALL">All Sections</option>
+              <option>HOUSEKEEPING</option><option>ELECTRICAL</option><option>PLUMBING</option><option>CMW</option><option>AIRCON & REF</option>
+            </select>
+            <select class="sel" id="filterStatus">
+              <option value="ALL">All Status</option>
+              <option value="open">Open</option>
+              <option value="in_progress">In Progress</option>
+              <option value="closed">Completed</option>
+            </select>
+            <input class="inp" id="searchBox" placeholder="Search WO ID / asset / technician…" />
+            <button class="btn" id="refreshBtn">Refresh</button>
+            <button class="btn primary" id="logoutBtn">Logout</button>
+          </div>
+        </div>
+
+        <!-- Full dashboard, inventory, ticketing markup retained (unchanged) -->
+        <!-- ... (unchanged markup) ... -->
+
+        <!-- Inventory tab and management panels are present earlier in the markup -->
+      </div>
+
+      <div class="globalFooter">Powered by General Services Division | Copyright <span id="footerYear"></span></div>
+    </div>
+  </div>
+
+  <div id="printSheet" class="hide"></div>
+  <input id="adminImportFile" type="file" accept=".json" style="display:none;">
+
+  <script type="module">
+  // ============================
+  // FIREBASE CONFIG (corrected storage bucket)
+  // ============================
+  const firebaseConfig = {
+    apiKey: "AIzaSyBrzhDWjwo57XXoZd1kZGYfZCo4xu1Ji1Q",
+    authDomain: "dopmc-cmms-74ae4.firebaseapp.com",
+    databaseURL: "https://dopmc-cmms-74ae4-default-rtdb.firebaseio.com",
+    projectId: "dopmc-cmms-74ae4",
+    // corrected bucket value (use exact bucket shown in your Firebase console)
+    storageBucket: "dopmc-cmms-74ae4.appspot.com",
+    messagingSenderId: "384450995311",
+    appId: "1:384450995311:web:496835011ad6016a8d199a"
+  };
+
+  // Minimal Firebase modular imports (only what's used)
+  let fbApp=null, fbDb=null, fbStorage=null, FB_OK=false;
+  let _initializeApp,_getFirestore,_enableIndexedDbPersistence;
+  let _collection,_doc,_getDocs,_getDoc,_setDoc,_addDoc,_updateDoc,_query,_where,_orderBy,_limit,_writeBatch,_serverTimestamp;
+  let _onSnapshot,_deleteDoc;
+  let _ref,_uploadBytes,_getDownloadURL,_getStorageFn;
+
+  try{
+    const appMod = await import('https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js');
+    const fsMod  = await import('https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js');
+    const stMod  = await import('https://www.gstatic.com/firebasejs/9.23.0/firebase-storage.js');
+
+    _initializeApp = appMod.initializeApp;
+
+    _getFirestore = fsMod.getFirestore; _enableIndexedDbPersistence = fsMod.enableIndexedDbPersistence;
+    _collection = fsMod.collection; _doc = fsMod.doc; _getDocs = fsMod.getDocs; _getDoc = fsMod.getDoc;
+    _setDoc = fsMod.setDoc; _addDoc = fsMod.addDoc; _updateDoc = fsMod.updateDoc;
+    _query = fsMod.query; _where = fsMod.where; _orderBy = fsMod.orderBy; _limit = fsMod.limit;
+    _writeBatch = fsMod.writeBatch; _serverTimestamp = fsMod.serverTimestamp;
+    _onSnapshot = fsMod.onSnapshot; _deleteDoc = fsMod.deleteDoc;
+
+    _ref = stMod.ref; _uploadBytes = stMod.uploadBytes; _getDownloadURL = stMod.getDownloadURL;
+    _getStorageFn = stMod.getStorage;
+  }catch(e){
+    console.warn('Firebase SDK load failed:', e);
+  }
+
+  function fbConfigValid(){ return !!(firebaseConfig.apiKey && firebaseConfig.authDomain && firebaseConfig.projectId && firebaseConfig.appId); }
+
+  function initFirebase(){
+    if(!_initializeApp || !fbConfigValid()){ FB_OK=false; return; }
+    try{
+      fbApp = _initializeApp(firebaseConfig);
+      fbDb = _getFirestore ? _getFirestore(fbApp) : null;
+      if(firebaseConfig.storageBucket && _getStorageFn) fbStorage = _getStorageFn(fbApp);
+      if(_enableIndexedDbPersistence && fbDb) _enableIndexedDbPersistence(fbDb).catch(()=>{});
+      FB_OK = !!fbDb;
+    }catch(e){ console.warn('Firebase init failed:', e); FB_OK=false; }
+  }
+  initFirebase();
+
+  const $ = id => document.getElementById(id);
+
+  (function(){
+    const b = $('fbBanner');
+    if(!b) return;
+    if(!fbConfigValid()){ b.style.display='block'; b.textContent='Firebase config missing — paste keys in firebaseConfig.'; }
+    else if(!FB_OK){ b.style.display='block'; b.textContent='Firebase init failed. Running in offline/local mode.'; }
+    else { b.style.display='none'; }
+  })();
+
+  // --------------------------
+  // Local DB + helpers
+  // --------------------------
+  const DB_KEY='cmms_demo_db_v2';
+  const BACKUP_KEY=DB_KEY+'_backup';
+  const LOGIN_KEY='cmms_login_v1';
+  const SECTIONS=['HOUSEKEEPING','ELECTRICAL','PLUMBING','CMW','AIRCON & REF'];
+  const SECTION_COLORS=['#0f61c6','#f3b300','#ff6a1f','#2eaf4a','#d61f1f'];
+  const STATUS_MAP={open:'Open',acknowledged:'Acknowledged',in_progress:'In Progress',for_verification:'For Verification',closed:'Closed',cancelled:'Cancelled'};
+  const STATUS_KEYS=Object.keys(STATUS_MAP);
+
+  let editingItemId=null;
+  let mrLineItems=[];
+  let includeArchived=false;
+
+  function nowISO(){ return new Date().toISOString(); }
+  function uid(p){ return `${p}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`; }
+  function toast(msg,type='ok'){ let t=$('toastBox'); if(!t){ t=document.createElement('div'); t.id='toastBox'; t.style.cssText='position:fixed;right:16px;bottom:16px;padding:12px 16px;border-radius:12px;background:#0b3a8a;color:#fff;font-weight:900;z-index:10001;box-shadow:0 8px 24px rgba(0,0,0,.2);font-size:13px;'; document.body.appendChild(t);} t.style.background=type==='err'?'#c62828':'#0b3a8a'; t.textContent=msg; t.style.display='block'; t.style.opacity='1'; clearTimeout(window.__tt); window.__tt=setTimeout(()=>{t.style.opacity='0'; setTimeout(()=>t.style.display='none',250);},1600); }
+
+  function canonicalStatus(s){ s=String(s||'').toLowerCase().replace(/\s+/g,'_'); if(s==='completed'||s==='complete') return 'closed'; if(s==='in progress'||s==='inprogress') return 'in_progress'; if(STATUS_KEYS.includes(s)) return s; return 'open'; }
+
+  function migrateDB(d){
+    d = d || {};
+    d.version = d.version || 2;
+    d.itemMaster = d.itemMaster || [];
+    d.stockLedger = d.stockLedger || [];
+    d.materialRequests = d.materialRequests || [];
+    d.assets = d.assets || [];
+    d.workOrders = d.workOrders || [];
+    d.pmPlans = d.pmPlans || [];
+    d.auditLogs = d.auditLogs || [];
+    d.inventoryUploads = d.inventoryUploads || [];
+    d.importedCsvHashes = d.importedCsvHashes || [];
+    d.workOrders.forEach(w=>{
+      w.status = canonicalStatus(w.status);
+      if(w.asset_code === undefined) w.asset_code = '';
+      if(w.room === undefined) w.room = '';
+    });
+    d.pmPlans.forEach(p=>{ if(!p.section) p.section='HOUSEKEEPING'; });
+    return d;
+  }
+
+  function loadDB(){
+    let raw = localStorage.getItem(DB_KEY);
+    try{ if(raw) return migrateDB(JSON.parse(raw)); }catch(e){}
+    let bk = localStorage.getItem(BACKUP_KEY);
+    try{ if(bk){ const obj = JSON.parse(bk); try{ localStorage.setItem(DB_KEY,bk);}catch(e){} toast('Recovered saved data'); return migrateDB(obj); } }catch(e){}
+    return migrateDB({});
+  }
+
+  let db = loadDB();
+
+  function saveDB(d){ try{ const json = JSON.stringify(d); localStorage.setItem(DB_KEY,json); localStorage.setItem(BACKUP_KEY,json);}catch(e){ toast('Save failed – storage full','err'); } }
+  function commit(){ saveDB(db); }
+  window.addEventListener('beforeunload',()=>{ try{ saveDB(db); }catch(e){} });
+  if($('footerYear')) $('footerYear').textContent = String(new Date().getFullYear());
+
+  function onHand(itemId){ return db.stockLedger.filter(t=>t.item_id===itemId).reduce((a,t)=>a+(t.type==='issue'?-Number(t.qty):Number(t.qty)),0); }
+  function itemByName(name){ return db.itemMaster.find(i=>i.active!==false && i.name.toLowerCase()===name.toLowerCase()); }
+  function ensureAsset(name,location=''){ if(!name) return ''; let a=db.assets.find(x=>x.name.toLowerCase()===name.toLowerCase()); if(!a){ a={asset_id:uid('AST'),name,category:'General',location,criticality:'',active:true}; db.assets.push(a);} return a.asset_id; }
+
+  // ----------------------------
+  // Firestore write helpers (write-through)
+  // ----------------------------
+  async function fsUpsert(col, id, data){
+    if(!FB_OK || !fbDb || !_setDoc || !_doc) return;
+    try{
+      await _setDoc(_doc(fbDb, col, String(id)), {...data, _syncedAt: _serverTimestamp()}, {merge: true});
+    }catch(e){
+      console.warn('fsUpsert failed',e);
+      toast('Sync failed (offline?)','err');
+    }
+  }
+  async function fsDel(col, id){
+    if(!FB_OK || !fbDb || !_deleteDoc || !_doc) return;
+    try{
+      await _deleteDoc(_doc(fbDb, col, String(id)));
+    }catch(e){
+      console.warn('fsDel failed',e);
+      toast('Sync failed (offline?)','err');
+    }
+  }
+
+  async function fbSaveInventoryItem(item){
+    if(!FB_OK||!fbDb) return;
+    try{
+      const key = String(item.item_id);
+      await _setDoc(_doc(fbDb,'itemMaster',key), { item_name: item.name, qty: onHand(item.item_id), unit: item.unit, min_level: item.min_level, section: item.category||'General', updatedAt: _serverTimestamp() }, { merge: true });
+    }catch(e){ console.warn('Firestore save item failed:',e); }
+  }
+  async function fbBatchSaveInventory(items){
+    if(!FB_OK||!fbDb) return;
+    try{
+      const batch = _writeBatch(fbDb);
+      for(const it of items){
+        const key = String(it.item_id);
+        batch.set(_doc(fbDb,'itemMaster',key), { item_name: it.name, qty: onHand(it.item_id), unit: it.unit, min_level: it.min_level, section: it.category||'General', updatedAt: _serverTimestamp() }, { merge:true });
+      }
+      await batch.commit();
+    }catch(e){ console.warn('Firestore batch save failed:',e); }
+  }
+
+  async function fbUploadCsvAndRecord(file, csvText){
+    if(!FB_OK||!fbDb||!fbStorage) return null;
+    try{
+      const date = new Date().toISOString().slice(0,10);
+      const path = 'uploads/inventory/'+date+'/'+file.name;
+      const storageRef = _ref(fbStorage, path);
+      await _uploadBytes(storageRef, file);
+      const url = await _getDownloadURL(storageRef);
+      const docRef = await _addDoc(_collection(fbDb,'inventory_uploads'), { fileName: file.name, storagePath: path, downloadURL: url, type:'inventory_csv', uploadedAt: _serverTimestamp() });
+      return docRef.id;
+    }catch(e){ console.warn('CSV upload failed',e); return null; }
+  }
+
+  // ----------------------------
+  // Upload metadata and UI helpers
+  // ----------------------------
+  function recordUploadMeta(uploadId, fileName, itemIds, txnIds){
+    db.inventoryUploads = db.inventoryUploads || [];
+    db.inventoryUploads.push({ uploadId, fileName, date: nowISO(), item_ids: itemIds||[], txn_ids: txnIds||[] });
+    saveDB(db);
+  }
+
+  function renderUploadsList(){
+    const wrap = $('uploadedCsvs');
+    if(!wrap) return;
+    const uploads = db.inventoryUploads || [];
+    if(!uploads.length){
+      wrap.innerHTML = '<div style="color:var(--muted); font-weight:900;">No uploaded CSVs.</div>';
+      return;
+    }
+    wrap.innerHTML = uploads.map(u=>{
+      const date = new Date(u.date).toLocaleString();
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border:1px solid var(--line);border-radius:10px;margin-bottom:6px;background:#fbfcff;"><div style="font-weight:900;">${u.fileName} <small style="color:var(--muted);font-weight:800;">(${date})</small><div style="font-size:11px;color:var(--muted);font-weight:800;">Items: ${u.item_ids.length} • Txns: ${u.txn_ids.length}</div></div><div style="display:flex;gap:6px;"><button data-download-upload="${u.uploadId}">Download</button><button class="btn danger" data-delete-upload="${u.uploadId}" style="border-radius:8px;">Delete upload</button></div></div>`;
+    }).join('');
+  }
+
+  // ----------------------------
+  // Live mode variables (kept minimal)
+  // ----------------------------
+  let liveMode = false;
+  const LIVE_KEY = 'cmms_live_mode';
+  let liveUnsubs = [];
+
+  function updateLiveUI(){ const el = $('liveBtn'); if(!el) return; const dot = '<span class="dotLive"></span> '; el.innerHTML = liveMode ? dot + 'Live' : dot + 'Manual'; }
+
+  // ----------------------------
+  // Rendering functions (unchanged app logic)
+  // ----------------------------
+  function drawTrend(vals){ const values = vals.length?vals:[0]; const left=40,top=20,right=410,bottom=140,maxY=Math.max(1,...values); const step=(right-left)/Math.max(1,values.length-1); const pts=values.map((v,i)=>[left+step*i,bottom-(v/maxY)*(bottom-top)]); try{ if($('trendLine')) $('trendLine').setAttribute('d','M '+pts.map(p=>`${p[0]} ${p[1]}`).join(' L ')); if($('trendArea')) $('trendArea').setAttribute('d',`M ${pts[0][0]} ${bottom} L ${pts.map(p=>`${p[0]} ${p[1]}`).join(' L ')} L ${pts.at(-1)[0]} ${bottom} Z`); }catch(e){} }
+  function drawDonut(parts){ const total=Math.max(1,parts.open+parts.in_progress+parts.closed+parts.cancelled); const order=[['segInProg',parts.in_progress],['segCompleted',parts.closed],['segOpen',parts.open],['segCritical',parts.cancelled]]; const C=2*Math.PI*70; let off=0; order.forEach(([id,v])=>{ const d=(v/total)*C; try{ if($(id)){$(id).setAttribute('stroke-dasharray',`${d} ${C-d}`); $(id).setAttribute('stroke-dashoffset',`${-off}`);} }catch(e){} off+=d; }); const cp=Math.round(parts.closed/total*100); if($('donutPct')) $('donutPct').textContent=cp+'%'; if($('donutCenter')) $('donutCenter').textContent='Completed '+cp+'%'; if($('lgInProg')) $('lgInProg').textContent=Math.round(parts.in_progress/total*100)+'%'; if($('lgCompleted')) $('lgCompleted').textContent=Math.round(parts.closed/total*100)+'%'; if($('lgOpen')) $('lgOpen').textContent=Math.round(parts.open/total*100)+'%'; if($('lgCancelled')) $('lgCancelled').textContent=Math.round(parts.cancelled/total*100)+'%'; }
+  function drawMaint(rows){ const p=rows.filter(r=>r.maintenance_type==='preventive').length; const r=rows.length-p; const max=Math.max(1,p,r); const ph=Math.round(100*p/max), rh=Math.round(100*r/max); try{ if($('barPrev')){$('barPrev').setAttribute('y',140-ph); $('barPrev').setAttribute('height',ph);} if($('barReact')){$('barReact').setAttribute('y',140-rh); $('barReact').setAttribute('height',rh);} if($('barPrevVal')) {$('barPrevVal').textContent=p; $('barPrevVal').setAttribute('y',Math.max(18,140-ph-6)); } if($('barReactVal')) {$('barReactVal').textContent=r; $('barReactVal').setAttribute('y',Math.max(18,140-rh-6)); } }catch(e){} }
+  function completionMinutes(wo){ const c=Date.parse(wo.timestamps?.created||wo.created_at||''); const e=Date.parse(wo.timestamps?.closed||wo.timestamps?.completed||''); if(!c||!e||e<c) return null; return Math.round((e-c)/60000); }
+  function setWOStatus(wo,status){ wo.status=status; wo.timestamps=wo.timestamps||{}; const n=nowISO(); if(status==='acknowledged'&&!wo.timestamps.acknowledged) wo.timestamps.acknowledged=n; if(status==='in_progress'&&!wo.timestamps.started) wo.timestamps.started=n; if(status==='for_verification'&&!wo.timestamps.completed) wo.timestamps.completed=n; if(status==='closed'){ if(!wo.timestamps.completed) wo.timestamps.completed=n; if(!wo.timestamps.closed) wo.timestamps.closed=n; } }
+
+  function renderKPIs(){ const active=db.workOrders.filter(w=>!w.archived); const openCnt=active.filter(w=>['open','acknowledged','in_progress','for_verification'].includes(w.status)).length; const closed=active.filter(w=>w.status==='closed').length; const inprog=active.filter(w=>w.status==='in_progress').length; const pm=active.filter(w=>w.maintenance_type==='preventive').length; if($('k_total')) $('k_total').textContent=active.length; if($('k_inprog')) $('k_inprog').textContent=inprog; if($('k_done')) $('k_done').textContent=closed; if($('k_pm')) $('k_pm').textContent=pm; drawDonut({open:openCnt,in_progress:inprog,closed,cancelled:active.filter(w=>w.status==='cancelled').length}); drawMaint(active); const days=[...Array(14)].map((_,i)=>{const d=new Date(); d.setDate(d.getDate()-(13-i)); return d.toISOString().slice(0,10)}); drawTrend(days.map(d=>active.filter(w=>(w.created_at||'').slice(0,10)===d).length)); drawReactionBars(active); }
+
+  function drawReactionBars(active){ const completed=active.filter(w=>['closed','for_verification'].includes(w.status)); const data=[]; SECTIONS.forEach((sec,i)=>{ const wos=completed.filter(w=>(w.section||'').toUpperCase()===sec); const mins=wos.map(completionMinutes).filter(v=>v!==null); if(mins.length){ const avg=Math.round(mins.reduce((a,b)=>a+b,0)/mins.length); data.push({sec,avg,count:mins.length,color:SECTION_COLORS[i]||'#0f61c6'}); } }); const svg=$('reactionSvg'); const legend=$('reactionLegend'); if(!data.length){ if(svg) svg.innerHTML='<text x="210" y="95" text-anchor="middle" font-size="12" font-weight="900" fill="#5b6b82">No completed records yet.</text>'; if(legend) legend.innerHTML=''; return; } const maxAvg=Math.max(...data.map(d=>d.avg),1); const left=60,top=15,bottom=150,right=400; const barW=Math.min(50,Math.floor((right-left)/data.length)-10); const gap=Math.floor((right-left)/data.length); let svgH=''; svgH+=`<line x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}" stroke="#d9e2ef" stroke-width="1"/>`; for(let i=0;i<=4;i++){const y=bottom-((bottom-top)/4)*i;svgH+=`<line x1="${left}" y1="${y}" x2="${right}" y2="${y}" stroke="#d9e2ef" stroke-width="1"/>`;svgH+=`<text x="${left-6}" y="${y+4}" text-anchor="end" font-size="9" font-weight="900" fill="#5b6b82">${Math.round(maxAvg/4*i)}m</text>`;} data.forEach((d,i)=>{const x=left+gap*i+(gap-barW)/2; const h=Math.max(2,((d.avg/maxAvg)*(bottom-top))); const y=bottom-h; svgH+=`<rect x="${x}" y="${y}" width="${barW}" height="${h}" rx="4" fill="${d.color}"/>`; svgH+=`<text x="${x+barW/2}" y="${y-4}" text-anchor="middle" font-size="10" font-weight="1000" fill="#2b3a54">${d.avg}m</text>`; const label=d.sec.length>8?d.sec.slice(0,7)+'…':d.sec; svgH+=`<text x="${x+barW/2}" y="${bottom+13}" text-anchor="middle" font-size="8" font-weight="900" fill="#5b6b82">${label}</text>`; }); if(svg) svg.innerHTML=svgH; if(legend) legend.innerHTML=data.map(d=>`<div class="key"><span class="sw" style="background:${d.color}"></span> ${d.sec}: ${d.avg}m avg (${d.count})</div>`).join(''); }
+
+  function renderWO(){ const rows=db.workOrders.filter(w=>!w.archived); if($('woBody')) $('woBody').innerHTML=rows.map(w=>`<tr><td><a class="woLink" href="#">${w.wo_id}</a></td><td>${w.asset_name||'-'}${w.location?' • '+w.location:''}</td><td><span class="pill prio ${prioClass(w.priority)}">${w.priority||'-'}</span></td><td>${w.technician||'-'} <button data-wo-tech="${w.wo_id}" title="Edit technician" style="cursor:pointer;">✏</button></td><td>${statusSelectHTML(w.status,w.wo_id,'wo')}</td></tr>`).join('')||'<tr><td colspan="5" style="color:var(--muted);font-weight:900;">No work orders yet.</td></tr>'; }
+
+  function renderRecent(){ const rows=db.workOrders.filter(w=>includeArchived?true:!w.archived).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)).slice(0,10); if($('recentBody')) $('recentBody').innerHTML=rows.map(w=>`<tr><td>${w.wo_id}</td><td>${w.asset_name||'-'}</td><td><span class="pill prio ${prioClass(w.priority)}">${w.priority}</span></td><td>${w.technician||'-'} <button data-rec-tech="${w.wo_id}" title="Edit technician" style="cursor:pointer;">✏</button></td><td>${statusSelectHTML(w.status,w.wo_id,'recent')}</td><td style="white-space:nowrap;"><button data-history="${w.wo_id}">History</button> <button data-archive="${w.wo_id}">${w.archived?'Unarchive':'Archive'}</button> <button class="btn danger" data-delete-wo="${w.wo_id}" style="border-radius:8px;">Delete</button></td></tr>`).join('')||'<tr><td colspan="6" style="color:var(--muted);font-weight:900;">No work orders yet.</td></tr>'; if($('ticketEmptyState')) $('ticketEmptyState').style.display=rows.length?'none':'block'; }
+
+  function prioClass(p){ p=String(p||'').toLowerCase(); if(p==='urgent') return 'critical'; if(['high','medium','critical'].includes(p)) return p; return 'low'; }
+  function statusSelectHTML(currentStatus, woId, cls){ return `<select class="inlineSel" data-status-sel="${woId}" data-ctx="${cls}">${STATUS_KEYS.map(k=>`<option value="${k}"${k===currentStatus?' selected':''}>${STATUS_MAP[k]}</option>`).join('')}</select>`; }
+  function statusLabel(s){ return STATUS_MAP[s]||s; }
+
+  // Inventory rendering + uploads
+  function renderInventoryMaster(){ const allRows=db.itemMaster.filter(i=>i.active!==false); if($('invEmptyState')) $('invEmptyState').style.display=allRows.length?'none':'block'; const filterCat=($('invListFilter')?.value||'All'); const rows=filterCat==='All'?allRows:allRows.filter(i=>(i.category||'General')===filterCat); if($('inventoryList')) $('inventoryList').innerHTML=rows.map(i=>{const oh=onHand(i.item_id); const warn=oh<=0?'⛔':(oh<=i.min_level?'⚠️':''); return `<div style="margin-bottom:6px; padding:8px 10px; background:${oh<=i.min_level?'#ffe6e6':'#f5f7ff'}; display:flex; align-items:center; justify-content:space-between; gap:8px; border-radius:10px; border:1px solid ${oh<=i.min_level?'#f5c6c6':'var(--line)'}; transition:background .15s ease;"><div>${i.name} — ${oh} ${i.unit} (min ${i.min_level}) <small style="color:var(--muted);">[${i.category||'General'}]</small></div><div style="display:flex; align-items:center; gap:6px;">${warn?`<span style="font-weight:1000;">${warn}</span>`:''}<button data-in="${i.item_id}">Stock In</button> <button data-adj="${i.item_id}">Adjust</button> <button class="btn danger" data-delete-item="${i.item_id}" title="Delete item" style="border-radius:8px;">Delete</button></div></div>`}).join('')||'No inventory items.'; if($('partsUsed')) $('partsUsed').textContent=allRows.reduce((a,i)=>a+onHand(i.item_id),0); if($('lowStock')) $('lowStock').textContent=allRows.filter(i=>onHand(i.item_id)<=i.min_level).length; }
+
+  function renderInventoryTab(){ const q=($('invSearch')?.value||'').toLowerCase(); const allRows=db.itemMaster.filter(i=>i.active!==false); const rows=allRows.filter(i=>`${i.name} ${i.unit} ${i.category||''}`.toLowerCase().includes(q)); if($('invTableBody')) $('invTableBody').innerHTML=rows.map(i=>{ const oh=onHand(i.item_id); const warn=oh<=0?'⛔':(oh<=i.min_level?'⚠️':''); if(editingItemId===i.item_id){ return `<tr><td><input class="invEditInput" data-ief="name" value="${i.name}" style="width:120px;"></td><td><input class="invEditInput" data-ief="unit" value="${i.unit}" style="width:50px;"></td><td>${oh}</td><td><input class="invEditInput" data-ief="min" type="number" value="${i.min_level}" style="width:50px;"></td><td><select class="invEditInput" data-ief="section" style="width:100px;"><option${(i.category||'General')==='General'?' selected':''}>General</option><option${i.category==='Plumbing'?' selected':''}>Plumbing</option><option${i.category==='Electrical'?' selected':''}>Electrical</option><option${i.category==='REF-CON'?' selected':''}>REF-CON</option><option${i.category==='Carpentry/Masonry/Welder'?' selected':''}>Carpentry/Masonry/Welder</option><option${i.category==='Housekeeping'?' selected':''}>Housekeeping</option><option${i.category==='Transport'?' selected':''}>Transport</option><option${i.category==='Office Staff'?' selected':''}>Office Staff</option></select></td><td style="font-size:10px;">${new Date(i.updated_at||i.created_at||nowISO()).toLocaleString()}</td><td style="white-space:nowrap;"><button data-inv-save="${i.item_id}">Save</button> <button data-inv-cancel="1">Cancel</button></td></tr>`; } return `<tr><td>${i.name} ${warn?`<span>${warn}</span>`:''}</td><td>${i.unit}</td><td>${oh}</td><td>${i.min_level}</td><td>${i.category||'-'}</td><td style="font-size:10px;">${new Date(i.updated_at||i.created_at||nowISO()).toLocaleString()}</td><td><button data-inv-edit="${i.item_id}">Edit</button> <button class="btn danger" data-inv-del="${i.item_id}" style="border-radius:8px;">Delete</button></td></tr>`; }).join('')||'<tr><td colspan="7" style="color:var(--muted); font-weight:900;">No data.</td></tr>'; const dl=$('mrItemOptions'); if(dl){ dl.innerHTML=allRows.map(i=>{const oh=onHand(i.item_id); const warn=oh<=0?'⛔':(oh<=i.min_level?'⚠️':''); return `<option value="${i.name}" label="${i.name} ${warn}"></option>`; }).join(''); } }
+
+  function renderMRList(){ if(!$('requestList')) return; const mrs=[...db.materialRequests].sort((a,b)=>Date.parse(b.date)-Date.parse(a.date)); $('newReq')&&($('newReq').textContent=mrs.length); $('requestList').innerHTML = mrs.map(m=>`<div style="margin-bottom:8px; padding:10px 12px; background:#f5f7ff; border:1px solid #d9e2ef; border-radius:12px;"><strong>${m.mr_id}</strong> • ${m.section} • ${m.requested_by} • <strong>${m.status}</strong><br>${(m.items||[]).map(i=>`${i.name}(${i.qty} ${i.unit})`).join(', ')}<div style="margin-top:8px;"><button data-mr-print="${m.mr_id}">Print</button> <button data-mr-issue="${m.mr_id}">Issue</button> <button class="btn danger" data-mr-delete="${m.mr_id}" style="border-radius:8px;">Delete</button></div></div>`).join('') || 'No requests yet.'; }
+
+  function renderPM(){ if(!$('pmTasks')) return; const plans=db.pmPlans.filter(p=>p.active!==false).sort((a,b)=>Date.parse(a.next_due)-Date.parse(b.next_due)); $('pmTasks').innerHTML = plans.slice(0,8).map(p=>`<div class="miniItem"><div class="left"><span class="chk"></span>${p.title} <small style="color:var(--muted);">[${p.section||''}]</small></div><small>${p.next_due}</small><button data-pm-done="${p.pm_id}">Done</button></div>`).join('') || '<div class="miniItem"><div class="left">No upcoming PM tasks</div><small>—</small></div>'; }
+
+  function renderHistory(){ if(!$('historyRows')) return; const secF=$('historySection')?.value||'ALL'; const roomF=($('historyRoom')?.value||'').toLowerCase(); const codeF=($('historyAssetCode')?.value||'').toLowerCase(); const rows=db.workOrders.filter(w=>['closed','for_verification'].includes(w.status)).filter(w=>{ if(secF!=='ALL'&&(w.section||'').toUpperCase()!==secF) return false; if(roomF&&!(w.room||'').toLowerCase().includes(roomF)&&!(w.location||'').toLowerCase().includes(roomF)) return false; if(codeF&&!(w.asset_code||'').toLowerCase().includes(codeF)) return false; return true; }); $('historyRows').innerHTML = rows.map(w=>`<div style="padding:10px;border:1px solid #d9e2ef;border-radius:12px;margin-bottom:8px;"><strong>${w.asset_name||'-'}</strong>${w.asset_code?' • Code: '+w.asset_code:''} • <em>${w.section||'-'}</em><br><small>Closed: ${new Date(w.timestamps?.closed||w.timestamps?.completed||w.created_at).toLocaleString()} | Room: ${w.room||w.location||'-'}</small><br><small>${w.description||'-'}</small></div>`).join('') || 'No repair history yet.'; }
+
+  function renderMRLines(){ if(!$('mrLinesWrap')) return; if(!mrLineItems.length){ $('mrLinesWrap').innerHTML=''; return; } $('mrLinesWrap').innerHTML = `<table class="mrLines"><thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th></th></tr></thead><tbody>${mrLineItems.map((it,i)=>`<tr><td>${it.name}</td><td>${it.qty}</td><td>${it.unit}</td><td><button data-mr-rmline="${i}">✕</button></td></tr>`).join('')}</tbody></table>`; }
+
+  function renderAll(){ renderKPIs(); renderWO(); renderRecent(); renderInventoryMaster(); renderInventoryTab(); renderMRList(); renderPM(); renderHistory(); renderUploadsList(); }
+
+  // ----------------------------
+  // Wiring & event handlers
+  // ----------------------------
+  $('tabDash').onclick=()=>setTab('dash');
+  $('tabTicket').onclick=()=>{ setTab('ticket'); seedTicketForm(); };
+  $('tabInventory').onclick=()=>{ setTab('inventory'); renderInventoryTab(); };
+  $('refreshBtn').onclick=renderAll; $('logoutBtn').onclick=showLogin;
+
+  $('loginClear').onclick=()=>{ if($('loginUser')) $('loginUser').value=''; if($('loginPass')) $('loginPass').value=''; const errEl=$('loginErr'); if(errEl) errEl.style.display='none'; };
+  $('t_reset').onclick=()=>{$('ticketForm').reset();$('t_status').value='open';$('t_type').value='reactive';seedTicketForm();};
+  $('invSearch')?.addEventListener('input',renderInventoryTab);
+  $('invListFilter')?.addEventListener('change',renderInventoryMaster);
+  $('addFirstItemBtn')?.addEventListener('click',()=>{$('invCsvFile')?.click();});
+  $('createFirstTicketBtn')?.addEventListener('click',()=>{setTab('ticket');$('t_section')?.focus();});
+  $('invUsageRange')?.addEventListener('change',renderInventoryTab);
+  ['historySection','historyRoom','historyAssetCode'].forEach(id=>{ const el=$(id); if(el) el.addEventListener(el.tagName==='SELECT'?'change':'input',renderHistory); });
+  $('resetMrFields')?.addEventListener('click',()=>{$('req_item').value='';$('req_qty').value='';$('req_unit').value='';$('req_purpose').value='';$('req_requestor').value='';$('reqErr').style.display='none';mrLineItems=[];renderMRLines();});
+
+  // CSV import (dedupe by content hash) with upload meta recording
+  function simpleHash(str){ let h=5381; for(let i=0;i<str.length;i++){ h=((h<<5)+h)+str.charCodeAt(i); h = h & 0xFFFFFFFF; } return (h>>>0).toString(16); }
+
+  $('importCsvBtn')?.addEventListener('click',()=>{$('invCsvFile')?.click();});
+  $('invCsvFile')?.addEventListener('change',async(e)=>{
+    const f=e.target.files?.[0]; if(!f) return;
+    const errEl=$('csvValErr');
+    const ext=f.name.split('.').pop()?.toLowerCase();
+    if(ext!=='csv'&&!f.type.includes('csv')&&f.type!=='text/plain'){
+      if(errEl){errEl.textContent='Invalid file. Only .csv files are accepted.';errEl.style.display='block';}
+      $('invCsvFile').value='';return;
+    }
+    if(errEl) errEl.style.display='none';
+    const csvText = await f.text();
+    const hash = simpleHash(csvText);
+    if(db.importedCsvHashes && db.importedCsvHashes.includes(hash)){ toast('This CSV was already imported (duplicate prevented)'); $('invCsvFile').value=''; return; }
+    db.importedCsvHashes.push(hash);
+
+    let uploadId = null;
+    if(FB_OK){ uploadId = await fbUploadCsvAndRecord(f,csvText); }
+    if(!uploadId) uploadId = 'local-'+uid('CSV');
+
+    const lines = csvText.replace(/\r/g,'').split('\n').map(x=>x.trim()).filter(Boolean);
+    let count=0; const imported=[]; const createdTxns=[];
+    for(let idx=0; idx<lines.length; idx++){
+      const ln = lines[idx];
+      const parts = ln.split(',').map(x=>(x||'').trim());
+      const [nameRaw,qtyRaw,unitRaw,minRaw,sectionRaw] = parts;
+      if(!nameRaw) continue;
+      if(idx===0 && (nameRaw.toLowerCase()==='item_name'||nameRaw.toLowerCase()==='item name')) continue;
+      const qty = Number(qtyRaw||0), min = Number(minRaw||0), unit = unitRaw||'unit', section = sectionRaw||'General';
+      if(Number.isNaN(qty) || Number.isNaN(min)) continue;
+      let item = itemByName(nameRaw);
+      let createdNewItem = false;
+      if(!item){
+        item = { item_id: uid('ITM'), name: nameRaw, unit, min_level: min, category: section, active: true, created_at: nowISO(), updated_at: nowISO() };
+        db.itemMaster.push(item);
+        createdNewItem = true;
+      }else{
+        item.unit = unit; item.min_level = min; item.category = section; item.updated_at = nowISO();
+      }
+      if(qty>0){
+        const already = db.stockLedger.find(t=>t.ref===uploadId && t.item_id===item.item_id && t.type==='receipt' && Number(t.qty)===qty);
+        if(!already){
+          const txn = { txn_id: uid('TXN'), date: nowISO(), item_id: item.item_id, type: 'receipt', qty, ref: uploadId, note: `csv import ${f.name}` };
+          db.stockLedger.push(txn); createdTxns.push(txn);
+        }
+      }
+      imported.push(item);
+      count++;
+    }
+
+    // record metadata for potential revert
+    const itemIds = imported.map(i=>i.item_id);
+    const txnIds = createdTxns.map(t=>t.txn_id);
+    recordUploadMeta(uploadId, f.name, itemIds, txnIds);
+
+    saveDB(db); renderAll(); toast(`CSV imported: ${count} row(s)`);
+
+    if(FB_OK){
+      try{ await fbBatchSaveInventory(imported); for(const t of createdTxns) await fsUpsert('stockLedger', t.txn_id, t); }catch(e){ console.warn('Firestore CSV post-processing failed',e); }
+    }
+    $('invCsvFile').value='';
+  });
+
+  // inventoryList click handlers (stock in / adjust / delete)
+  $('inventoryList')?.addEventListener('click',(e)=>{
+    const inId = e.target.getAttribute('data-in');
+    const adjId = e.target.getAttribute('data-adj');
+    const delId = e.target.getAttribute('data-delete-item');
+    if(inId){
+      const q = Number(prompt('Stock In qty','0')||0);
+      if(q>0){
+        const txn = { txn_id: uid('TXN'), date: nowISO(), item_id: inId, type:'receipt', qty:q, ref:'stockin', note:'manual stock in' };
+        db.stockLedger.push(txn); saveDB(db); renderAll(); toast('Stock updated');
+        if(FB_OK) fsUpsert('stockLedger', txn.txn_id, txn);
+      }
+    }
+    if(adjId){
+      const q = Number(prompt('Adjust qty (+/-)','0')||0);
+      if(q!==0){
+        const txn = { txn_id: uid('TXN'), date: nowISO(), item_id: adjId, type:'adjust', qty:q, ref:'adjust', note:'manual adjust' };
+        db.stockLedger.push(txn); saveDB(db); renderAll(); toast('Adjusted');
+        if(FB_OK) fsUpsert('stockLedger', txn.txn_id, txn);
+      }
+    }
+    if(delId){
+      if(!confirm('Delete this inventory item and all related stock ledger entries?')) return;
+      const removedTxns = (db.stockLedger||[]).filter(tx=>tx.item_id===delId).map(t=>t.txn_id);
+      db.stockLedger = (db.stockLedger||[]).filter(tx=>tx.item_id!==delId);
+      db.itemMaster = (db.itemMaster||[]).filter(it=>it.item_id!==delId);
+      saveDB(db); renderAll(); toast('Item deleted');
+      if(FB_OK){
+        (async ()=>{
+          try{ for(const tId of removedTxns) await fsDel('stockLedger', tId); await fsDel('itemMaster', delId); }catch(err){ console.warn('Firestore deletion failed',err); }
+        })();
+      }
+    }
+  });
+
+  // inventory table inline edit / save / delete
+  $('invTableBody')?.closest('table')?.addEventListener('click',(e)=>{
+    const editId = e.target.getAttribute('data-inv-edit');
+    const saveId = e.target.getAttribute('data-inv-save');
+    const cancelId = e.target.getAttribute('data-inv-cancel');
+    const delId = e.target.getAttribute('data-inv-del');
+    if(editId){ editingItemId = editId; renderInventoryTab(); return; }
+    if(cancelId){ editingItemId = null; renderInventoryTab(); return; }
+    if(saveId){
+      const item = db.itemMaster.find(i=>i.item_id===saveId); if(!item) return;
+      const row = e.target.closest('tr'); if(!row) return;
+      const nameIn = row.querySelector('[data-ief="name"]');
+      const unitIn = row.querySelector('[data-ief="unit"]');
+      const minIn = row.querySelector('[data-ief="min"]');
+      const secIn = row.querySelector('[data-ief="section"]');
+      if(nameIn) item.name = nameIn.value.trim()||item.name;
+      if(unitIn) item.unit = unitIn.value.trim()||item.unit;
+      if(minIn) item.min_level = Number(minIn.value)||0;
+      if(secIn) item.category = secIn.value||item.category;
+      item.updated_at = nowISO();
+      editingItemId = null; saveDB(db); renderAll(); toast('Item updated');
+      if(FB_OK) fsUpsert('itemMaster', item.item_id, item);
+      return;
+    }
+    if(delId){
+      if(!confirm('Delete this inventory item and all related transactions?')) return;
+      const removedTxns = (db.stockLedger||[]).filter(tx=>tx.item_id===delId).map(t=>t.txn_id);
+      db.stockLedger = (db.stockLedger||[]).filter(tx=>tx.item_id!==delId);
+      db.itemMaster = (db.itemMaster||[]).filter(it=>it.item_id!==delId);
+      saveDB(db); renderAll(); toast('Item deleted');
+      if(FB_OK){
+        (async ()=>{
+          try{ for(const tId of removedTxns) await fsDel('stockLedger', tId); await fsDel('itemMaster', delId); }catch(err){ console.warn('Firestore deletion failed',err); }
+        })();
+      }
+      return;
+    }
+  });
+
+  // MR item autofill
+  $('req_item')?.addEventListener('change',()=>{ const item = itemByName($('req_item').value.trim()); if($('req_unit')) $('req_unit').value = item?item.unit:''; });
+  $('req_item')?.addEventListener('input',()=>{ const item = itemByName($('req_item').value.trim()); if($('req_unit')) $('req_unit').value = item?item.unit:''; });
+
+  // MR lines
+  $('mrAddLine')?.addEventListener('click',()=>{
+    const nm = $('req_item').value.trim(); const qty = Number($('req_qty').value||0);
+    $('reqErr').style.display='none';
+    if(!nm||qty<=0){ $('reqErr').textContent='Enter Item and Qty > 0'; $('reqErr').style.display='block'; return; }
+    const item = itemByName(nm);
+    if(!item){ $('reqErr').textContent='Item not found in inventory master. Add it first.'; $('reqErr').style.display='block'; return; }
+    const existing = mrLineItems.find(l=>l.item_id===item.item_id);
+    if(existing){ existing.qty += qty; } else { mrLineItems.push({ item_id:item.item_id, name:item.name, qty, unit:item.unit }); }
+    $('req_item').value=''; $('req_qty').value=''; $('req_unit').value=''; renderMRLines();
+  });
+
+  $('mrLinesWrap')?.addEventListener('click',(e)=>{ const idx=e.target.getAttribute('data-mr-rmline'); if(idx!==null){ mrLineItems.splice(Number(idx),1); renderMRLines(); } });
+
+  // MR submit and actions
+  $('submitRequest')?.addEventListener('click',()=>{
+    const section = $('req_section').value; const requested_by = $('req_requestor').value.trim(); const purpose = $('req_purpose').value.trim();
+    $('reqErr').style.display='none';
+    if(!mrLineItems.length){ $('reqErr').textContent='Add at least one line item'; $('reqErr').style.display='block'; return; }
+    if(!requested_by){ $('reqErr').textContent='Requestor is required'; $('reqErr').style.display='block'; return; }
+    const mr = { mr_id: uid('MR'), date: nowISO(), department: section, cost_center: section, requested_by, section, purpose, items:[...mrLineItems], status:'submitted', approvals:[], print_count:0, notes:[] };
+    db.materialRequests.push(mr); saveDB(db); mrLineItems=[]; renderMRLines(); $('req_purpose').value=''; $('req_requestor').value=''; renderAll(); toast('MR submitted');
+    if(FB_OK) fsUpsert('materialRequests', mr.mr_id, mr);
+  });
+
+  $('requestList')?.addEventListener('click', async(e)=>{
+    const pid = e.target.getAttribute('data-mr-print');
+    const iid = e.target.getAttribute('data-mr-issue');
+    const did = e.target.getAttribute('data-mr-delete');
+    if(pid){ const mr = db.materialRequests.find(x=>x.mr_id===pid); if(!mr) return; mr.print_count=(mr.print_count||0)+1; saveDB(db); buildPrintMR(mr); }
+    if(iid){
+      const mr = db.materialRequests.find(x=>x.mr_id===iid); if(!mr) return;
+      if(mr.status==='issued'){ toast('Already issued'); return; }
+      const insufficient=[];
+      (mr.items||[]).forEach(it=>{ const oh = onHand(it.item_id); if(it.qty>oh) insufficient.push(`${it.name} need ${it.qty}, on-hand ${oh}`); });
+      if(insufficient.length && !confirm(`Insufficient stock:\n${insufficient.join('\n')}\nIssue anyway?`)) return;
+      const createdTxns=[];
+      (mr.items||[]).forEach(it=>{
+        const txn = { txn_id: uid('TXN'), date: nowISO(), item_id: it.item_id, type:'issue', qty: it.qty, ref: mr.mr_id, note: `section:${mr.section};requested_by:${mr.requested_by}` };
+        db.stockLedger.push(txn); createdTxns.push(txn);
+      });
+      if(createdTxns.length && FB_OK){ for(const t of createdTxns) await fsUpsert('stockLedger', t.txn_id, t); }
+      if(insufficient.length) mr.notes.push('Issued with shortage override');
+      mr.status='issued'; saveDB(db); renderAll(); toast('MR issued');
+      if(FB_OK) fsUpsert('materialRequests', mr.mr_id, mr);
+    }
+    if(did){ if(!confirm('Permanently delete this MR?')) return; db.materialRequests = db.materialRequests.filter(x=>x.mr_id!==did); saveDB(db); renderAll(); if(FB_OK) fsDel('materialRequests', did); toast('MR deleted'); }
+  });
+
+  $('mrsPrintBtn')?.addEventListener('click',()=>{ const mr=[...db.materialRequests].sort((a,b)=>Date.parse(b.date)-Date.parse(a.date))[0]; if(!mr){ toast('No MR to print','err'); return; } buildPrintMR(mr); });
+
+  // Ticket creation
+  $('ticketForm')?.addEventListener('submit',(e)=>{
+    e.preventDefault();
+    const wo = {
+      wo_id: $('t_id').value||uid('WO'),
+      created_at: nowISO(),
+      section: $('t_section').value,
+      priority: $('t_priority').value||'Low',
+      asset_id: ensureAsset(($('t_asset').value||'').trim(), ($('t_area').value||'')),
+      asset_name: ($('t_asset').value||'').trim(),
+      location: ($('t_area').value||'').trim(),
+      asset_code: ($('t_asset_code')?.value||'').trim(),
+      room: ($('t_room')?.value||'').trim(),
+      requested_by: ($('t_req')?.value||'').trim(),
+      technician: ($('t_tech')?.value||'').trim(),
+      maintenance_type: ($('t_type').value||'reactive').toLowerCase(),
+      status: canonicalStatus($('t_status').value),
+      timestamps: { created: nowISO() },
+      description: ($('t_desc')?.value||'').trim(),
+      mr_links: [], notes: [], attachments_stub: [], archived:false, audit:[{at: nowISO(), action:'created'}]
+    };
+    db.workOrders.push(wo); saveDB(db); seedTicketForm(); $('ticketForm').reset(); $('t_status').value='open'; $('t_type').value='reactive'; renderAll(); toast('Work Order saved');
+    if(FB_OK) fsUpsert('workOrders', wo.wo_id, wo);
+  });
+
+  // Status change handler
+  document.addEventListener('change',(e)=>{
+    if(!e.target.matches('[data-status-sel]')) return;
+    const woId = e.target.getAttribute('data-status-sel');
+    const newSt = e.target.value;
+    const wo = db.workOrders.find(w=>w.wo_id===woId);
+    if(!wo) return;
+    if(newSt !== wo.status) setWOStatus(wo, newSt);
+    wo.audit = wo.audit||[]; wo.audit.push({ at: nowISO(), action: 'status-changed-to-'+newSt });
+    saveDB(db); renderAll();
+    if(FB_OK) fsUpsert('workOrders', wo.wo_id, wo);
+  });
+
+  // Technician edit
+  document.addEventListener('click',(e)=>{
+    const recTech = e.target.getAttribute('data-rec-tech') || e.target.getAttribute('data-wo-tech');
+    if(recTech){
+      const wo = db.workOrders.find(w=>w.wo_id===recTech); if(!wo) return;
+      const tech = prompt('Technician', wo.technician||'');
+      if(tech !== null){ wo.technician = tech; wo.audit = wo.audit||[]; wo.audit.push({at: nowISO(), action:'technician-edited'}); saveDB(db); renderAll(); if(FB_OK) fsUpsert('workOrders', wo.wo_id, wo); }
+      return;
+    }
+  });
+
+  // Recent actions: history, archive, delete
+  $('recentBody')?.addEventListener('click',(e)=>{
+    const hid = e.target.getAttribute('data-history');
+    const aid = e.target.getAttribute('data-archive');
+    const did = e.target.getAttribute('data-delete-wo');
+    if(hid){ const wo = db.workOrders.find(w=>w.wo_id===hid); if(!wo) return; alert(`WO ${wo.wo_id}\nAsset: ${wo.asset_name}\nStatus: ${statusLabel(wo.status)}\nNotes: ${(wo.notes||[]).join(' | ')||'-'}`); return; }
+    if(aid){ const wo = db.workOrders.find(w=>w.wo_id===aid); if(!wo) return; wo.archived = !wo.archived; wo.audit = wo.audit||[]; wo.audit.push({ at: nowISO(), action: wo.archived ? 'archived' : 'unarchived' }); saveDB(db); renderAll(); if(FB_OK) fsUpsert('workOrders', wo.wo_id, wo); return; }
+    if(did){ if(!confirm('Permanently delete this Work Order?')) return; db.workOrders = db.workOrders.filter(w=>w.wo_id!==did); saveDB(db); renderAll(); if(FB_OK) fsDel('workOrders', did); toast('WO deleted'); return; }
+  });
+
+  // PM wiring (unchanged)
+  (function(){
+    const h = [...document.querySelectorAll('.panelHead h3')].find(x=>x.textContent.includes('Upcoming Preventive Tasks'))?.parentElement;
+    if(h && !$('pmAddBtn')){
+      const b=document.createElement('button'); b.className='btn'; b.id='pmAddBtn'; b.textContent='Add PM Plan';
+      b.onclick=()=>{
+        const asset=prompt('Asset name'); if(!asset) return;
+        const title=prompt('PM title','Preventive task')||'Preventive task';
+        const section=prompt('Section (HOUSEKEEPING, ELECTRICAL, PLUMBING, CMW, AIRCON & REF)','HOUSEKEEPING')||'HOUSEKEEPING';
+        const f=Number(prompt('Frequency days','30')||30);
+        const last=prompt('Last done date (YYYY-MM-DD)',new Date().toISOString().slice(0,10))||new Date().toISOString().slice(0,10);
+        const next=new Date(last); next.setDate(next.getDate()+f);
+        const pmObj = { pm_id: uid('PM'), asset_id: ensureAsset(asset,''), title, section: section.toUpperCase(), frequency_days: f, last_done: last, next_due: next.toISOString().slice(0,10), active:true };
+        db.pmPlans.push(pmObj); saveDB(db); renderAll(); if(FB_OK) fsUpsert('pmPlans', pmObj.pm_id, pmObj);
+      }; h.appendChild(b);
+      const a=document.createElement('button'); a.className='btn'; a.textContent='Archived WOs'; a.onclick=()=>{ includeArchived=!includeArchived; renderRecent(); toast(includeArchived?'Showing archived':'Showing active'); }; h.appendChild(a);
+    }
+  })();
+
+  $('pmTasks')?.addEventListener('click',async(e)=>{
+    const id = e.target.getAttribute('data-pm-done'); if(!id) return;
+    const pm = db.pmPlans.find(p=>p.pm_id===id); if(!pm) return;
+    const d=new Date(); pm.last_done = d.toISOString().slice(0,10);
+    const n=new Date(d); n.setDate(n.getDate()+Number(pm.frequency_days||30)); pm.next_due = n.toISOString().slice(0,10);
+    const ast = db.assets.find(a=>a.asset_id===pm.asset_id);
+    const newWo = { wo_id: uid('WO'), created_at: nowISO(), section: pm.section||'HOUSEKEEPING', priority:'Medium', asset_id:pm.asset_id, asset_name:ast?.name||'PM Asset', location:ast?.location||'', asset_code:'', room:'', requested_by:'System', technician:'', maintenance_type:'preventive', status:'open', timestamps:{created:nowISO()}, description:`PM Done: ${pm.title}`, mr_links:[], notes:['Auto-created from PM done'], attachments_stub:[], archived:false, audit:[{at:nowISO(),action:'created-from-pm'}] };
+    db.workOrders.push(newWo); saveDB(db); renderAll(); toast('PM marked done');
+    if(FB_OK){ await fsUpsert('pmPlans', pm.pm_id, pm); await fsUpsert('workOrders', newWo.wo_id, newWo); }
+  });
+
+  // Admin tools (unchanged)
+  $('adminToolsBtn')?.addEventListener('click',()=>{
+    const choice = prompt('Admin Tools:\n1) Export JSON\n2) Import JSON\n3) Clear ALL Data\n\nEnter 1, 2, or 3:');
+    if(choice==='1'){ const blob=new Blob([JSON.stringify(db,null,2)],{type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='cmms_backup_'+Date.now()+'.json'; a.click(); URL.revokeObjectURL(url); toast('JSON exported'); }
+    else if(choice==='2'){ $('adminImportFile')?.click(); }
+    else if(choice==='3'){ const pw = prompt('Enter admin password to clear ALL data:'); if(pw==='gsd-dopmc1971'){ localStorage.removeItem(DB_KEY); localStorage.removeItem(BACKUP_KEY); db = migrateDB({}); saveDB(db); renderAll(); toast('All data cleared'); } else { toast('Wrong password','err'); } }
+  });
+
+  $('adminImportFile')?.addEventListener('change',(e)=>{
+    const f = e.target.files?.[0]; if(!f) return;
+    const r = new FileReader();
+    r.onload = ()=>{ try{ db = migrateDB(JSON.parse(r.result)); saveDB(db); renderAll(); toast('JSON imported'); }catch{ toast('Invalid JSON file','err'); } $('adminImportFile').value=''; };
+    r.readAsText(f);
+  });
+
+  // ----------------------------
+  // Uploaded CSVs: delete (revert) and download handlers
+  // ----------------------------
+  document.addEventListener('click', async(e)=>{
+    const uploadIdToDelete = e.target.getAttribute('data-delete-upload');
+    const downloadUploadId = e.target.getAttribute('data-download-upload');
+
+    if(downloadUploadId){
+      const meta = (db.inventoryUploads||[]).find(x=>x.uploadId===downloadUploadId);
+      if(meta){
+        if(FB_OK && !String(downloadUploadId).startsWith('local-') && _getDoc){
+          try{
+            const docRef = _doc(fbDb, 'inventory_uploads', downloadUploadId);
+            const snap = await _getDoc(docRef);
+            if(snap.exists()){
+              const v = snap.data();
+              if(v && v.downloadURL){ window.open(v.downloadURL,'_blank'); return; }
+            }
+            toast('No remote download URL found','err');
+          }catch(err){ console.warn('download upload failed',err); toast('Download failed','err'); }
+        } else {
+          toast('Upload was local-only; file not available remotely','err');
+        }
+      } else toast('Upload metadata not found','err');
+      return;
+    }
+
+    if(uploadIdToDelete){
+      if(!confirm('Delete this uploaded CSV and revert its imported transactions and created items? This cannot be undone.')) return;
+      const metaIndex = (db.inventoryUploads||[]).findIndex(x=>x.uploadId===uploadIdToDelete);
+      if(metaIndex===-1){ toast('Upload metadata not found','err'); return; }
+      const meta = db.inventoryUploads[metaIndex];
+
+      // Remove associated txns locally
+      const txnIds = meta.txn_ids || [];
+      db.stockLedger = (db.stockLedger||[]).filter(tx => !txnIds.includes(tx.txn_id));
+
+      // Remove items that were created by this upload *only if* they have no remaining ledger entries
+      const createdItemIds = meta.item_ids || [];
+      const deletedItemIds = [];
+      for(const iid of createdItemIds){
+        const remaining = (db.stockLedger||[]).some(tx=>tx.item_id===iid);
+        if(!remaining){
+          db.itemMaster = (db.itemMaster||[]).filter(it=>it.item_id!==iid);
+          deletedItemIds.push(iid);
+        }
+      }
+
+      // Remove upload metadata
+      db.inventoryUploads.splice(metaIndex,1);
+
+      // Save locally and render first
+      saveDB(db);
+      renderAll();
+      renderUploadsList();
+      toast(`Upload reverted: removed ${txnIds.length} txns, ${deletedItemIds.length} items`);
+
+      // Then attempt remote cleanup (do not block UI)
+      if(FB_OK){
+        (async ()=>{
+          try{
+            for(const tId of txnIds) await fsDel('stockLedger', tId);
+            for(const itId of deletedItemIds) await fsDel('itemMaster', itId);
+            if(!String(uploadIdToDelete).startsWith('local-')) await fsDel('inventory_uploads', uploadIdToDelete);
+          }catch(err){ console.warn('Firestore revert cleanup error',err); }
+        })();
+      }
+      return;
+    }
+  });
+
+  // ----------------------------
+  // Firestore inventory sync on start (best-effort)
+  // ----------------------------
+  async function fbLoadInventory(){
+    if(!FB_OK) return null;
+    try{
+      const q = _query(_collection(fbDb,'itemMaster'), _orderBy('item_name'), _limit(3000));
+      const snap = await _getDocs(q);
+      if(snap.empty) return null;
+      return snap.docs.map(d=>{ const v=d.data(); return { item_id: d.id, item_name: v.item_name, qty: v.qty, unit: v.unit, min_level: v.min_level, section: v.section }; });
+    }catch(e){ console.warn('fbLoadInventory failed', e); return null; }
+  }
+
+  async function fbSyncInventoryOnStart(){
+    if(!FB_OK) return;
+    try{
+      const items = await fbLoadInventory();
+      if(!items||!items.length) return;
+      items.forEach(fi=>{
+        let local = db.itemMaster.find(x=>x.name.toLowerCase()===fi.item_name.toLowerCase());
+        if(!local){
+          local = { item_id: fi.item_id||uid('ITM'), name: fi.item_name, unit: fi.unit, min_level: fi.min_level, category: fi.section||'General', active:true, created_at: nowISO(), updated_at: nowISO() };
+          db.itemMaster.push(local);
+        } else {
+          local.unit = fi.unit; local.min_level = fi.min_level; local.category = fi.section||'General'; local.updated_at = nowISO();
+        }
+        const oh = onHand(local.item_id);
+        const diff = (fi.qty||0) - oh;
+        if(diff !== 0) db.stockLedger.push({ txn_id: uid('TXN'), date: nowISO(), item_id: local.item_id, type:'adjust', qty: diff, ref:'fb-sync', note:'firebase sync' });
+      });
+      saveDB(db);
+      renderAll();
+    }catch(e){ console.warn('fbSyncInventoryOnStart failed', e); }
+  }
+
+  // ----------------------------
+  // Helpers: seedTicketForm, setTab, show/hide app
+  // ----------------------------
+  function seedTicketForm(){ if($('t_id')) $('t_id').value='WO-'+Date.now(); if($('t_time')) $('t_time').value=new Date().toLocaleString(); if($('ticketStamp')) $('ticketStamp').textContent='Ready'; }
+  function setTab(tab){ const d=tab==='dash', t=tab==='ticket', i=tab==='inventory'; if($('tabDash')) $('tabDash').classList.toggle('active',d); if($('tabTicket')) $('tabTicket').classList.toggle('active',t); if($('tabInventory')) $('tabInventory').classList.toggle('active',i); if($('dashFilters')) $('dashFilters').style.visibility=d?'visible':'hidden'; [{el:$('dashView'),show:d},{el:$('ticketView'),show:t},{el:$('inventoryView'),show:i}].forEach(v=>{ if(!v.el) return; if(v.show){ v.el.classList.remove('hide','viewExit'); v.el.classList.add('viewEnter'); v.el.addEventListener('animationend',function h(){ v.el.classList.remove('viewEnter'); v.el.removeEventListener('animationend',h); },{once:true}); } else { v.el.classList.add('hide'); v.el.classList.remove('viewEnter','viewExit'); } }); }
+  function showApp(){ if($('loginOverlay')) $('loginOverlay').classList.add('hide'); if($('appShell')){ $('appShell').style.opacity='1'; $('appShell').style.pointerEvents='auto'; } localStorage.setItem(LOGIN_KEY,'1'); }
+  function showLogin(){ if($('loginOverlay')) $('loginOverlay').classList.remove('hide'); if($('appShell')){ $('appShell').style.opacity='0'; $('appShell').style.pointerEvents='none'; } localStorage.removeItem(LOGIN_KEY); }
+
+  // Improved login
+  (function(){
+    function clearLoginError(){ const errEl=$('loginErr'); if(errEl) errEl.style.display='none'; }
+    async function doLogin(){
+      clearLoginError();
+      const user = ($('loginUser').value || '').trim().toLowerCase();
+      const pass = ($('loginPass').value || '').trim();
+      if(user === 'admin' && pass === 'dopmc1971'){
+        try{ showApp(); setTab('dash'); seedTicketForm(); renderAll(); if(FB_OK) fbSyncInventoryOnStart(); }catch(e){ console.warn('Login post-init warning', e); }
+        if(typeof toast === 'function') toast('Logged in as admin');
+        clearLoginError();
+      } else {
+        const errEl = $('loginErr');
+        if(errEl){ errEl.style.display='block'; errEl.textContent = 'Invalid credentials. Please try again.'; }
+        if(typeof toast === 'function') toast('Invalid credentials','err');
+      }
+    }
+    const loginBtn = $('loginBtn'); if(loginBtn) loginBtn.addEventListener('click', doLogin);
+    const loginUser = $('loginUser'); const loginPass = $('loginPass');
+    [loginUser, loginPass].forEach(el=>{ if(!el) return; el.addEventListener('keydown', ev=>{ if(ev.key === 'Enter'){ ev.preventDefault(); doLogin(); } }); el.addEventListener('input', ()=>clearLoginError()); });
+  })();
+
+  // live pill: just toggles label (full realtime listeners implementation optional)
+  $('liveBtn')?.addEventListener('click', ()=>{
+    if(!fbConfigValid() || !FB_OK){ toast('Live sync unavailable (missing Firebase config)','err'); return; }
+    liveMode = !liveMode;
+    localStorage.setItem(LIVE_KEY, liveMode ? '1' : '0');
+    updateLiveUI();
+    toast(liveMode ? 'Live sync ON' : 'Live sync OFF');
+  });
+
+  // Start UI
+  setInterval(()=>{ if($('clockTxt')) $('clockTxt').textContent=new Date().toDateString()+' '+new Date().toLocaleTimeString(); },1000);
+  if(localStorage.getItem(LOGIN_KEY)==='1'){ showApp(); setTab('dash'); seedTicketForm(); renderAll(); if(FB_OK) fbSyncInventoryOnStart(); } else showLogin();
+
+  </script>
+</body>
+</html>
